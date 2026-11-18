@@ -40,12 +40,8 @@ def test_should_skip_only_looks_at_the_basename() -> None:
     assert should_skip("__MACOSX/发票/甲.pdf") is False  # 见下面的 __MACOSX 用例
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="已知缺陷：_expand_zip 未按 SKIP_DIR_NAMES 过滤 __MACOSX 目录名"
-    "（只在 _walk_dir 里生效），ZIP 内 __MACOSX/发票.pdf 会被当成正常文件解析",
-)
 def test_macosx_directory_inside_zip_is_skipped(tmp_path: Path) -> None:
+    """ZIP 内 __MACOSX 目录必须被逐段过滤（BUG-1 回归：修复后此用例应通过）。"""
     archive = write_zip(
         tmp_path / "包.zip",
         [

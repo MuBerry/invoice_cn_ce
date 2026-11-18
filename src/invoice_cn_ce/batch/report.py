@@ -200,9 +200,16 @@ def _sheet_items(ws, invoices: Sequence[BatchInvoice]) -> None:
             seq += 1
             row_type = item.row_type or ("折扣" if item.is_reversal else "商品")
             font = DISC_FONT if row_type == ROW_TYPE_DISCOUNT else BODY_FONT
+            # 数量列尽量写成数值，Excel 里才能直接 SUM；解析不出数字时保留原文。
+            qty_raw = str(item.quantity).strip() if item.quantity is not None else ""
+            try:
+                qty_num = float(qty_raw.replace(",", ""))
+                qty_val: object = int(qty_num) if qty_num.is_integer() else qty_num
+            except ValueError:
+                qty_val = item.quantity
             values = [
                 seq, inv.invoice_no, inv.invoice_date, inv.kind, inv.seller_name, row_type,
-                item.category, display_name(item), item.spec, item.unit, item.quantity,
+                item.category, display_name(item), item.spec, item.unit, qty_val,
                 item.unit_price,
                 to_float(item.amount), item.tax_rate, to_float(item.tax_amount), item.raw_line,
             ]
@@ -228,7 +235,10 @@ def _sheet_groups(ws, groups: dict, grand: Totals) -> None:
     _set_widths(ws, [40, 10, 16, 14, 16, 11])
     row = 1
     for dimension, stats in groups.items():
-        ws.cell(row=row, column=1, value=f"按「{dimension}」汇总").font = TITLE_FONT
+        # 「品目」是整票主品目口径（一张票归入净金额最大的品目），与 sheet4 的
+        # 逐行口径不同 —— 在标题里标明，避免被当成两处数字对不上。
+        note = "（按整票主品目归属，逐行口径见「品目汇总」）" if dimension == "品目" else ""
+        ws.cell(row=row, column=1, value=f"按「{dimension}」汇总{note}").font = TITLE_FONT
         ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
         row += 1
         _header_row(ws, row, [dimension, "张数", "金额(不含税)", "税额", "价税合计", "金额占比"],

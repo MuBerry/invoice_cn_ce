@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 from invoice_cn_ce.batch.ingest import SourceFile
+from invoice_cn_ce.parsers.items import UNIT_WORDS
 from invoice_cn_ce.schemas import InvoiceItem
 
 #: 金额校验容差（元）。票面两位小数，累加误差不应超过 2 分。
@@ -26,12 +27,26 @@ TOLERANCE = 0.02
 GROUP_CHOICES = ("销售方", "购买方", "月份", "税率", "品目")
 DEFAULT_GROUP = "销售方"
 
-#: 品名里的「规格噪声」标记，从第一个标记处截断。
+#: 品名里的「规格噪声」标记，从第一个标记处截断。这些是**版式用语**（说明规格的
+#: 起头词），不是某类商品的专名，换一张票也成立。
 _SPEC_MARKERS = ("适用于", "适用", "无仪器", "不含仪器", "瓶装", "盒装", "袋装",
                  "套装", "简装", "标准装", "零售装")
 _PAREN_RE = re.compile(r"[（(][^（()）]*[）)]")
-_QTY_TAIL_RE = re.compile(r"\d+\s*[支片包装袋盒瓶]\S*$")
 _CATEGORY_RE = re.compile(r"^\*([^*]{1,20})\*(.*)$", re.S)
+
+#: 尾缀「数量 + 计量单位」的通用形态（``200支`` / ``300片`` / ``10盒`` / ``1.5千克``）。
+#: 单位表复用解析层的 :data:`invoice_cn_ce.parsers.items.UNIT_WORDS` —— 只认计量
+#: 单位，**不含任何商品名**，避免把「试纸 / 试条 / 家用」这类业务词写死进正则。
+_UNIT_ALT = "|".join(
+    sorted((re.escape(u) for u in UNIT_WORDS), key=len, reverse=True)
+)
+#: ``200支试纸`` 这种「数量 + 单位 + 尾巴」整体切掉（单位后面还跟文字的形态）。
+_QTY_TAIL_RE = re.compile(rf"\s*\d+(?:\.\d+)?(?:{_UNIT_ALT})[\s\S]*$")
+#: 纯尾缀：``200支`` / ``1.5千克``，或紧跟在汉字后的裸数量 ``某商品300``。
+#: 裸数量必须紧跟汉字，避免把型号后缀（``打印纸A4``）当数量切掉。
+_TRAILING_QTY_RE = re.compile(
+    rf"(?:\s*\d+(?:\.\d+)?(?:{_UNIT_ALT})|(?<=[\u4e00-\u9fff])\d+(?:\.\d+)?)$"
+)
 
 
 # ---------------------------------------------------------------- 数值工具
@@ -367,19 +382,32 @@ def dominant_product(inv: BatchInvoice) -> str:
 
 
 def normalize_product_name(name: str) -> str:
-    """品目归一化：去 ``*类别*`` 前缀、去括号说明、去规格噪声、去尾部数量描述。"""
+    """品目归一化：去 ``*类别*`` 前缀、去括号说明、去规格噪声、去尾部数量描述。
+
+    规则全部是**通用形态**，不含任何商品专名：
+
+    1. 去掉 ``*类别*`` 前缀；
+    2. 去掉圆括号里的说明（``（不含仪器）`` 之类）；
+    3. 从第一个「版式用语」处截断（``适用于…``、``瓶装…``、``套装`` …）；
+    4. 去掉尾部的「数量 + 计量单位」（``200支``、``1.5千克``），以及紧跟在汉字
+       后面的裸数量（``某商品300``）；型号后缀（``打印纸A4``）不动；
+    5. 最后才合并空白 —— 先合并会把 ``A4 500张`` 粘成 ``A4500张``，把型号一起吃掉。
+
+    改规则只影响展示与聚合口径，**不动金额**；跨票的同物异名（一个品名是另一个的
+    前缀）由 :func:`_build_prefix_map` 再合并一次。
+    """
     text = name or ""
     m = _CATEGORY_RE.match(text)
     if m:
         text = m.group(2)
     text = _PAREN_RE.sub("", text)
-    text = re.sub(r"\s+", "", text)
     positions = [text.find(marker) for marker in _SPEC_MARKERS]
     positions = [p for p in positions if 4 <= p]
     if positions:
         text = text[: min(positions)]
     text = _QTY_TAIL_RE.sub("", text)
-    text = re.sub(r"(?:试纸|试条|片|支|装|家用)?\d+$", "", text)
+    text = _TRAILING_QTY_RE.sub("", text)
+    text = re.sub(r"\s+", "", text)
     return text.strip(" -*·、,，.。")
 
 

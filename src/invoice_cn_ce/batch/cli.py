@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import time
 import traceback
@@ -129,19 +130,28 @@ def build_parser() -> argparse.ArgumentParser:
 示例：
   python -m invoice_cn_ce.batch invoices
   python -m invoice_cn_ce.batch 发票.pdf -o D:\\报表
-  python -m invoice_cn_ce.batch 发票包.zip 补充\\*.pdf --group 销售方,月份
+  python -m invoice_cn_ce.batch 发票包.zip "补充\\*.pdf" --group 销售方,月份
   python -m invoice_cn_ce.batch . -o out --group 品目,税率
   python -m invoice_cn_ce.batch invoices --no-dedup      # 同号票也要各算一张
 
 说明：
   * 路径可以是单个文件、目录（递归扫描）或 ZIP（支持嵌套 ZIP），可混用；
+  * **支持通配符**：`*` / `?` / `[..]`，`**` 可递归（Windows cmd 自己不展开，
+    由本工具展开；含空格时用引号包住）；一个都没匹配上仍报「路径不存在」；
   * 支持 .pdf / .xml / .ofd；票头字段由上游 invoice_cn_ce 解析器提取；
   * PDF 的商品明细按词坐标重建版面（表头锚点 + 数值右对齐 + 税率反推），
     不依赖任何票样写死的坐标；
   * 自动跳过 __MACOSX、._*、~$*、隐藏文件等垃圾条目；
   * 同一文件重复出现按内容 hash 去重，同一张票重复出现按发票号码去重；
   * 扫描件（无文本层）、非发票文件进「异常清单」，不会静默算 0；
+  * 「品目」分组是按**整票主品目**归属（一张票计入其净金额最大的品目），
+    与 xlsx 里逐行口径的「品目汇总」sheet 不是一回事，两者页脚都有注明；
   * 把文件 / 文件夹 / ZIP 直接拖到仓库根目录的 drop.bat 上也能跑。
+
+退出码：
+  0  成功（至少 1 张有效发票）
+  2  参数或路径错误（没有可解析的文件、--group 维度非法、无参数）
+  3  跑完了但没有一张有效发票（全部解析失败 / 全是扫描件…），报表仍会输出
 
 输出：
   <输出目录>/发票汇总-YYYYMMDD-HHMMSS.xlsx   五个 sheet
@@ -157,7 +167,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--group", default=aggregate.DEFAULT_GROUP, metavar="维度",
                         help=("分组维度，默认「销售方」；可选："
                               + "、".join(aggregate.GROUP_CHOICES)
-                              + "，多个用逗号分隔，如「购买方,月份」"))
+                              + "，多个用逗号分隔，如「购买方,月份」"
+                              + "；其中「品目」按整票主品目归属（逐行口径见 xlsx 的「品目汇总」）"))
     parser.add_argument("--no-dedup", action="store_true",
                         help="关闭「按发票号码去重」（内容相同的文件仍只解析一次）")
     parser.add_argument("--keep-temp", action="store_true",
@@ -291,13 +302,20 @@ def run(argv: Optional[Sequence[str]] = None) -> int:
     paths = report.write_outputs(args.out, kept, issues, dedup, grand, groups, products,
                                 meta, stamp)
 
-    _print_summary(kept, issues, dedup, grand, result, elapsed)
+    _print_summary(kept, issues, dedup, grand, result, elapsed, group_dims)
     print(_bold("输出文件："))
     for key in ("xlsx", "csv", "json"):
         print(f"  {paths[key]}")
     print(_bold(f"\n不含税合计 {grand.amount:,.2f} | 税额 {grand.tax:,.2f} | "
                 f"价税合计 {grand.total:,.2f} | "
                 f"勾稽{'通过' if grand.reconciled else '不通过'}"))
+
+    if not kept:
+        # 「跑完了但一张有效票都没有」独立成一个退出码，脚本里才好和「正常跑完」
+        # 区分（类比 grep：没匹配到返回非 0）。报表仍然写出来了，异常清单可查原因。
+        print(_red("\n没有一张有效发票：见上方「异常清单」与输出目录里的 xlsx。"),
+              file=sys.stderr)
+        return 3
     return 0
 
 
@@ -306,6 +324,60 @@ def _short(text: str, limit: int = 88) -> str:
         return text
     head = limit // 2 - 2
     return f"{text[:head]}...{text[- (limit - head - 3):]}"
+
+
+#: ``ExtractResponse.message`` 里「自带完整含义」的英文 token -> 中文原因。
+_FAILURE_TEXT = {
+    "not_text": "PDF 无文本层（扫描件 / 纯图片），需先 OCR 或索取电子原件",
+    "empty_file": "空文件（0 字节），没有可解析内容",
+}
+
+#: ``<类别>: <细节>`` 形态的 token -> 中文类别名。
+_FAILURE_HEAD = {
+    "parse_failed": "解析失败",
+    "xml_parse_failed": "XML 解析失败",
+    "ofd_parse_failed": "OFD 解析失败",
+    "file_too_large": "文件超过大小上限",
+    "unsupported_format": "不支持的文件格式",
+}
+
+#: pdfminer 往 stderr 打的告警行（截断 PDF 上常见），不该当「失败原因」展示。
+_PDF_NOISE_RE = re.compile(r"^(?:WARNING|IGNORING|DEBUG|INFO)[:\s]", re.IGNORECASE)
+
+
+def _strip_pdf_noise(detail: str, limit: int = 160) -> str:
+    """压掉 pdfminer 的告警噪声，只留真正的失败原因（真失败不会被吞掉）。"""
+    if not detail:
+        return ""
+    lines = [line.strip() for line in str(detail).splitlines()]
+    kept = [line for line in lines if line and not _PDF_NOISE_RE.match(line)]
+    text = " ".join(kept).strip()
+    if len(text) > limit:
+        return text[: limit - 1] + "…"
+    return text
+
+
+def _failure_reason(resp) -> str:
+    """``ExtractResponse.message`` -> 中文失败原因（空串表示解析成功）。
+
+    上游 message 的契约是 ``"success"`` / ``"not_text"`` / ``"error: <token>[: <detail>]"``。
+    这里把 token 翻成中文，并把 pdfminer 的告警噪声压掉；**未知 token 原样附在末尾**，
+    免得把一个没见过的失败类型翻译成含糊的「解析失败」而无从排查。
+    """
+    message = (getattr(resp, "message", "") or "").strip()
+    if not message or message == "success":
+        return ""
+    text = message[len("error:"):].strip() if message.startswith("error:") else message
+    token, _, detail = text.partition(":")
+    token = token.strip()
+    detail = _strip_pdf_noise(detail.strip())
+
+    if token in _FAILURE_TEXT:
+        return _FAILURE_TEXT[token]
+    head = _FAILURE_HEAD.get(token)
+    if head:
+        return f"{head}：{detail}" if detail else head
+    return f"解析未成功：{detail}" if detail else f"解析未成功（{text}）"
 
 
 def _failure_reason(resp) -> str:
@@ -328,7 +400,8 @@ def _failure_reason(resp) -> str:
 
 
 def _print_summary(invoices: Sequence[BatchInvoice], issues: Sequence[dict],
-                   dedup: DedupInfo, grand, result, elapsed: float) -> None:
+                   dedup: DedupInfo, grand, result, elapsed: float,
+                   group_dims: Optional[Sequence[str]] = None) -> None:
     line = "=" * 78
     print("\n" + line)
     print(_bold(f"{APP_NAME} 结果"))
@@ -336,6 +409,8 @@ def _print_summary(invoices: Sequence[BatchInvoice], issues: Sequence[dict],
     print(f"输入路径     : {len(result.inputs)} 个")
     print(f"待解析文件   : {len(result.files)} 个（忽略 {len(result.skipped)} 个不支持的文件）")
     print(f"发票张数     : {len(invoices)} 张")
+    if group_dims:
+        print(f"分组维度     : {'、'.join(group_dims)}")
     if dedup.duplicate_count:
         print(_yellow(f"重复         : {dedup.duplicate_count} 处已忽略"
                       f"（内容重复 {len(dedup.by_hash)}，同号码 {len(dedup.by_number)}）"))

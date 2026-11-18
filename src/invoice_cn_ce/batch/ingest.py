@@ -5,7 +5,10 @@
 设计要点：
 
 * **过滤垃圾条目**：``__MACOSX``、``._*``（macOS 资源分叉）、``~$*``（Office 临时
-  文件）、``.`` 开头的隐藏文件、``Thumbs.db`` / ``desktop.ini`` 一律跳过。
+  文件）、``.`` 开头的隐藏文件、``Thumbs.db`` / ``desktop.ini`` 一律跳过。ZIP 条目
+  没有目录遍历帮忙剪枝，因此按**路径分段**逐段过滤（:func:`is_junk_path`）。
+* **通配符**：输入里的 ``*`` / ``?`` / ``[`` 按 :mod:`glob` 展开（Windows cmd 不展开），
+  支持 ``**`` 递归；一个都没匹配上时仍按「路径不存在」上报，不静默吞掉。
 * **可溯源**：每个文件都带上「来源包 → 包内路径」，报表里能一路追回原始压缩包。
 * **两级去重**：同一份文件在多个输入里出现时按内容 sha1 只解析一次；发票号码级
   去重留给 :mod:`invoice_cn_ce.batch.aggregate`。
@@ -14,6 +17,7 @@
 
 from __future__ import annotations
 
+import glob
 import hashlib
 import os
 import shutil
@@ -48,6 +52,48 @@ def should_skip(name: str) -> bool:
     if low.endswith(".crdownload") or low.endswith(".tmp"):
         return True
     return False
+
+
+def is_junk_path(rel_path: str) -> bool:
+    """相对路径（``发票/__MACOSX/._甲.pdf``）是否整体应被忽略。
+
+    逐段检查：**任一分段**命中 :func:`should_skip`（隐藏文件、``._*``、``~$*``、
+    ``Thumbs.db`` …）或 :data:`SKIP_DIR_NAMES`（``__MACOSX``、``.git`` …）就丢弃。
+    ZIP 里的条目是「一整条路径字符串」，没有目录遍历能替我们剪枝，所以必须在这里
+    逐段判；空路径（如纯目录条目）也视为垃圾。
+    """
+    parts = [p for p in (rel_path or "").replace("\\", "/").split("/") if p not in ("", ".")]
+    if not parts:
+        return True
+    return any(should_skip(part) or part.lower() in SKIP_DIR_NAMES for part in parts)
+
+
+#: 输入路径里出现这些字符就按通配符展开（Windows cmd 不展开 ``*.pdf``，只能自己来）。
+_GLOB_CHARS = ("*", "?", "[")
+
+
+def is_glob_pattern(text: str) -> bool:
+    return any(ch in text for ch in _GLOB_CHARS)
+
+
+def expand_input_path(raw: str) -> List[str]:
+    """把用户输入的一个「路径参数」展开成绝对路径列表。
+
+    * 普通路径：原样返回（后续由 ``collect`` 判断存在性并给出友好提示）；
+    * 通配符（``*.pdf`` / ``**/票.pdf`` / ``发票?[0-9].pdf``）：按 :mod:`glob`
+      展开（``recursive=True`` 支持 ``**``）；**一个都没匹配上**时仍返回原路径，
+      让上层照常报「路径不存在」，而不是静默产出 0 份文件。
+    """
+    text = str(raw).strip().strip('"')
+    if not text:
+        return []
+    pattern = os.path.expanduser(text)
+    if not is_glob_pattern(pattern):
+        return [os.path.abspath(pattern)]
+    matches = sorted(glob.glob(pattern, recursive=True))
+    if not matches:
+        return [os.path.abspath(pattern)]
+    return [os.path.abspath(item) for item in matches]
 
 
 def sha1_of(path: str, chunk_size: int = 1 << 20) -> str:
@@ -121,21 +167,23 @@ class Ingestor:
         for raw in paths:
             if not raw:
                 continue
-            path = os.path.abspath(os.path.expanduser(str(raw).strip().strip('"')))
-            self.result.inputs.append(path)
-            if not os.path.exists(path):
-                self.result.skipped.append((path, "路径不存在"))
-                continue
-            low = path.lower()
-            if os.path.isdir(path):
-                self._walk_dir(path, archive="", inner_prefix="")
-            elif low.endswith(ZIP_EXT):
-                self._expand_zip(path, depth=1, archive_name=os.path.basename(path),
-                                 inner_prefix="", origin=path)
-            elif low.endswith(SUPPORTED_EXTS):
-                self._add_file(path, archive="", inner="", display=path)
-            else:
-                self.result.skipped.append((path, "不是 PDF / XML / OFD / ZIP，已忽略"))
+            # 原始输入照录（报表「参数与说明」要能看到用户实际写了什么）
+            self.result.inputs.append(os.path.abspath(
+                os.path.expanduser(str(raw).strip().strip('"'))))
+            for path in expand_input_path(str(raw)):
+                if not os.path.exists(path):
+                    self.result.skipped.append((path, "路径不存在"))
+                    continue
+                low = path.lower()
+                if os.path.isdir(path):
+                    self._walk_dir(path, archive="", inner_prefix="")
+                elif low.endswith(ZIP_EXT):
+                    self._expand_zip(path, depth=1, archive_name=os.path.basename(path),
+                                     inner_prefix="", origin=path)
+                elif low.endswith(SUPPORTED_EXTS):
+                    self._add_file(path, archive="", inner="", display=path)
+                else:
+                    self.result.skipped.append((path, "不是 PDF / XML / OFD / ZIP，已忽略"))
         return self.result
 
     # ------------------------------------------------------------ 内部
@@ -181,7 +229,9 @@ class Ingestor:
                 if info.is_dir():
                     continue
                 name = info.filename.replace("\\", "/")
-                if any(should_skip(part) for part in name.split("/")):
+                # ZIP 条目是一整条路径串，没有目录遍历帮忙剪枝 —— 逐段过滤
+                # __MACOSX / .git / ._* / ~$* / 隐藏文件，缺一不可。
+                if is_junk_path(name):
                     continue
                 target = self._safe_join(dest, name)
                 if target is None:
@@ -238,5 +288,8 @@ __all__ = [
     "Ingestor",
     "SourceFile",
     "SUPPORTED_EXTS",
+    "expand_input_path",
+    "is_glob_pattern",
+    "is_junk_path",
     "should_skip",
 ]
