@@ -140,6 +140,9 @@ def _build_response(record: InvoiceRecord, filename: str, message: str) -> Extra
         payee=record.payee,
         reviewer=record.reviewer,
         drawer=record.drawer,
+        # 商品明细：PDF 路径由 parsers/items.py 按词坐标重建后填充，XML 路径
+        # 由 xml_invoice 填充，OFD 仍为空数组。
+        items=record.items,
         expense_category=record.expense_category,
         expense_category_label=record.expense_category_label,
         expense_category_source=record.expense_category_source,

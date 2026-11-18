@@ -18,11 +18,18 @@ import pdfplumber
 from invoice_cn_ce.config import settings
 from invoice_cn_ce.expense_category import classify_expense
 from invoice_cn_ce.parsers import dispatch
+from invoice_cn_ce.parsers.items import extract_items
 from invoice_cn_ce.schemas import InvoiceRecord, PdfRaw
 from invoice_cn_ce.utils import normalize_invoice_text, normalize_lines
 
 if TYPE_CHECKING:
     from pdfplumber.page import Page
+
+
+#: 哪些解析器产出的版面可以按「表格」重建明细行。其余票种（机票行程单、
+#: 火车票、非税票据、平台下载版…）的版式不是商品明细表，强行抽取只会产出
+#: 假明细，所以只在明确列表内启用。
+ITEM_PARSERS = frozenset({"new", "old"})
 
 
 @dataclass
@@ -131,6 +138,17 @@ def run(contents: bytes, *, with_raw: bool = False) -> ParseResult:
     record.expense_category = cat
     record.expense_category_label = label
     record.expense_category_source = source
+
+    # 商品明细：票头字段解析完之后再补，**排在消费类别分类之后**。
+    # L3/L4 分类规则会读 ``record.items``，若提前填充，同一张 PDF 的
+    # ``expense_category`` 会和 1.0.0 不一样（例如卖方关键词未命中、明细关键词
+    # 命中时结果不同）。这里刻意保持 1.0.0 的分类结果不变，明细只作为新增
+    # 数据随响应返回；需要明细参与分类的调用方可以自行调
+    # ``classify_expense(record, parser_name=...)``。
+    if parser_name in ITEM_PARSERS and not record.items:
+        items, _note = extract_items(pages, allow_fallback=True)
+        if items:
+            record.items = items
 
     pdf_raw = PdfRaw()
     if with_raw:

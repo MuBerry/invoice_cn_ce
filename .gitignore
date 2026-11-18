@@ -69,3 +69,6 @@ docs/assets/*.png
 *.swp
 *.swo
 *~
+
+# 批量导入与汇总的默认输出目录（invoice_cn_ce.batch / drop.bat）
+out/

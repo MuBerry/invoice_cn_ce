@@ -38,6 +38,9 @@ class InvoiceItem(BaseModel):
     ``is_reversal`` 不来自 XML，而是解析器依据负金额推导——红字冲销行在
     报税时要单独统计，调用方不应把它当普通商品行累加。
 
+    PDF 路径（:mod:`invoice_cn_ce.parsers.items`）按词坐标重建明细表后也填充
+    本模型，此时 ``row_type`` / ``raw_line`` 会带上「商品/折扣」与票面原文。
+
     H43: 字段名与国家税务总局 ``EInvoice`` schema 硬编码对应，schema 升级
     需要同步本文件。
     """
@@ -55,6 +58,14 @@ class InvoiceItem(BaseModel):
     total_amount: str = ""
     tax_classification_code: str = ""
     is_reversal: bool = False
+    # ── 以下两个字段是本 fork 的**增量扩展**，不参与上面那张 EInvoice 对应表 ──
+    # ``row_type`` 供批量汇总区分「商品 / 折扣 / 其他」：折扣行金额为负、紧跟在
+    # 商品行后面，报账时要摊回上一行，所以必须能一眼分辨。取值为中文枚举，
+    # XML / OFD 路径不填（保持空串），调用方按 ``is_reversal`` 兜底即可。
+    row_type: str = ""
+    # ``raw_line`` 是明细行的票面原文（多行以 ``⏎`` 连接）。PDF 的明细靠坐标
+    # 重建，字段切错时只能靠原文人工核对，故随行返回；其余格式留空。
+    raw_line: str = ""
 
 
 class InvoiceRecord(BaseModel):
@@ -74,8 +85,8 @@ class InvoiceRecord(BaseModel):
     payee: str = ""
     reviewer: str = ""
     drawer: str = ""
-    # 商品明细。仅 XML 全电发票填充；PDF / OFD 恒为空数组
-    # （OFD 暂不解析明细，见 README）。
+    # 商品明细。XML 全电发票由 xml_invoice 填充；标准电子发票 PDF 由
+    # parsers/items.py 按词坐标重建后填充；OFD 暂不解析明细（见 README）。
     items: List[InvoiceItem] = Field(default_factory=list)
     # 消费类别（由 expense_category.classify_expense 写入；空表示未命中或总开关关闭）。
     # 字段说明：
@@ -148,7 +159,7 @@ class ExtractResponse(BaseModel):
     payee: str = ""
     reviewer: str = ""
     drawer: str = ""
-    # 商品明细。仅 XML 全电发票填充；PDF / OFD 恒为空数组。
+    # 商品明细。XML 全电发票与标准电子发票 PDF 会填充；OFD 暂不解析。
     items: List[InvoiceItem] = Field(default_factory=list)
     # 消费类别（参见 InvoiceRecord 同名字段说明）
     expense_category: str = ""

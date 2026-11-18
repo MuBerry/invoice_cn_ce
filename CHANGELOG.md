@@ -4,6 +4,39 @@
 [Keep a Changelog](https://keepachangelog.com/)，版本号遵循
 [语义化版本](https://semver.org/)。
 
+## [Unreleased]
+
+> 本 fork 基于上游 **invoice_cn_ce 1.0.0**（giwu-lab/invoice_cn_ce, Apache-2.0），
+> 在其上增补「PDF 商品明细 + 批量导入 + 汇总报表」；上游票头解析器的行为保持不变。
+
+### 新增
+
+- **PDF 商品明细行**（`parsers/items.py`）：按 pdfplumber 词坐标重建明细表，动态定位列
+  （表头锚点 → 合计行右边界反推 → 税率 token 反推 → 兜底），结果填入 `items[]`。
+  折扣行保留负金额并带 `is_reversal=True`。**不写死任何票样坐标**：
+  `电子发票（普通发票）/（增值税专用发票）` 等「项目名称」表头样式通用。
+- **`InvoiceItem` 两个增量字段**：`row_type`（商品 / 折扣 / 其他）与 `raw_line`（票面原文）。
+  均为有默认值的可选字段，老调用方无需改动。
+- **批量导入与汇总子命令** `python -m invoice_cn_ce.batch`（`invoice_cn_ce.batch` 子包）：
+  - 输入：单文件 / 目录递归 / ZIP（含嵌套 ZIP），过滤 `__MACOSX`、`._*`、`~$*`、隐藏文件；
+  - 支持 `.pdf` / `.xml` / `.ofd`，解析复用 `formats.parse_pdf`；
+  - 逐票勾稽（Σ明细 vs 票面，容差 0.02 元）、按发票号去重、五维分组、品目归一化；
+  - 输出 xlsx（发票清单 / 发票明细 / 分组汇总 / 品目汇总 / 异常清单）+ csv（utf-8-sig）+ `数据.json`；
+  - 解析失败/扫描件进「异常清单」，不会产生金额 0 的假票。
+- **`drop.bat`**：把文件 / 文件夹 / ZIP 拖上去即跑，结果输出到 `out\` 并自动打开。
+- 控制台脚本 `invoice_cn_ce-batch`（等价于 `python -m invoice_cn_ce.batch`）。
+- 依赖新增 `openpyxl>=3.1`（报表用）。
+
+### 变更
+
+- `formats._build_response()` 现在把 `record.items` 带进响应 —— PDF 路径的明细不再恒为空数组。
+- `expense_category` 分类**刻意排在明细填充之前**，保证同一张 PDF 的消费类别与 1.0.0 完全一致
+  （L3/L4 规则会读 `items[]`，提前填充会改变分类结果）。
+
+### 修复
+
+- 无文本层 / 非发票文件的批量场景：不再被当成一张金额为 0 的发票计入张数与合计。
+
 ## [1.0.0] - 2026-11-01
 
 首个正式版本。
