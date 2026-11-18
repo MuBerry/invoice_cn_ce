@@ -12,6 +12,21 @@ mypy src/invoice_cn_ce
 > + Docker 冒烟（真实票据样本与完整用例集在私有验证环境，不入公开仓库）；
 > 企业版自身的用例在**企业版仓库**里单独运行。
 
+## 公开的批量汇总用例（`tests/`）
+
+`tests/` 随仓库发布，覆盖批量导入 / 解包 / 去重 / 汇总 / 报表与 PDF 明细行抽取。
+所有素材都是**运行时动态生成**的（最小 ZIP、合成词坐标、虚构主体），
+不含任何真实发票、公司名或税号。
+
+依赖真实票据的对账用例由环境变量开启：
+
+```bash
+INVOICE_FIXTURES=/path/to/local/invoices python -m pytest tests -q
+```
+
+未设置 `INVOICE_FIXTURES` 时这些用例自动 `skip`，因此在没有样本的机器上
+`pytest` 依然全绿。
+
 ## 样本从哪来
 
 样本共 42 个（35 PDF + 5 XML + 2 OFD）。`samples/` 按票种子目录组织：

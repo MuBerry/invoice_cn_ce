@@ -50,10 +50,9 @@ keys.json
 # only the public test fixtures under tests/ are committed.
 samples/
 
-# Test suite: kept in the private verification environment, not published.
-# The assertions are ground truth against the real samples under samples/,
-# so they carry real party names, tax ids and invoice numbers.
-tests/
+# tests/ 随仓库发布：批量汇总的用例只用动态生成的合成素材（无真实票据）。
+# 需要真实票据的对账用例通过 INVOICE_FIXTURES 环境变量指向本地样本目录，
+# 变量缺省时自动 skip —— 携带真实主体/税号的断言仍留在私有验证环境。
 
 # Runtime / deployment artefacts
 logs/invoice_cn_ce.pid
